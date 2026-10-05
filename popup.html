@@ -11,13 +11,28 @@
 			<h1 class="title">WeBWorKMAX</h1>
 
 			<section class="setting-group">
+				<label class="setting-label" for="backendUrl">Grade backend URL</label>
+				<input id="backendUrl" class="text-input" type="url" placeholder="https://your-service.onrender.com" />
+			</section>
+
+			<section class="setting-group">
+				<label class="setting-label" for="gradeApiKey">Shared API key</label>
+				<input id="gradeApiKey" class="text-input" type="password" autocomplete="off" />
+			</section>
+
+			<section class="setting-group">
+				<label class="setting-label" for="graderName">Your grader name</label>
+				<input id="graderName" class="text-input" type="text" maxlength="120" placeholder="Your name or nickname" />
+			</section>
+
+			<section class="setting-group">
 				<label class="setting-label" for="viewAutosaveButton">View Autosave</label>
 				<button id="viewAutosaveButton" class="view-button" type="button">View Autosave</button>
 				<p id="autosaveInfo" class="autosave-info" aria-live="polite"></p>
 			</section>
 
 			<section class="setting-group setting-inline">
-				<label class="setting-label" for="cosmeticsEnabled">Cosmetic fixes</label>
+				<label class="setting-label" for="cosmeticsEnabled">Cosmetics</label>
 				<label class="switch">
 					<input id="cosmeticsEnabled" type="checkbox" />
 					<span class="slider" aria-hidden="true"></span>

@@ -1,12 +1,19 @@
 const DEFAULT_SETTINGS = {
   autosaveInterval: "off",
-  cosmeticsEnabled: false,
+  cosmeticsEnabled: true,
 };
 
 const SCORE_COLUMN_WIDTH = "4.5rem";
 const AUTOSAVE_STORAGE_PREFIX = "webworkmaxAutosave:";
 const AUTOSAVE_INDEX_KEY = "webworkmaxAutosaveIndex";
 const UNSUBMITTED_BANNER_ID = "webworkmax-unsubmitted-banner";
+const ACTIVE_BANNER_ID = "webworkmaxbanner";
+const LEGACY_ACTIVE_BANNER_ID = "webworkmax-active-banner";
+const GRADE_BACKEND_LOADING_ID = "webworkmax-grade-backend-loading";
+const GRADE_BACKEND_STATUS_CLASS = "webworkmax-grade-backend-status";
+const UNSUBMITTED_FIELD_CLASS = "webworkmax-unsubmitted-field";
+const UNSUBMITTED_TOOLTIP_ID = "webworkmax-unsubmitted-tooltip";
+const GRADE_BACKEND_SETTINGS_KEY = "webworkmaxGradeBackendSettings";
 const LEAVE_GUARD_STYLE_ID = "webworkmax-leave-guard-style";
 const LEAVE_GUARD_MODAL_ID = "webworkmax-leave-guard-modal";
 const UNLOAD_WARNING_MESSAGE = "Changes are saved locally but are not submitted.";
@@ -19,6 +26,10 @@ let hasUnsubmittedLocalChanges = false;
 let isSubmittingGraderForm = false;
 let pendingLeaveAction = null;
 let baselineFormValuesSignature = null;
+let baselineAutosaveValues = null;
+let gradeSyncInProgress = false;
+let initialScoreValues = new Map();
+let gradeBackendStatusEnabled = DEFAULT_SETTINGS.cosmeticsEnabled;
 const textareaHomes = new WeakMap();
 const expandedRows = new WeakMap();
 const originalButtonLabels = new WeakMap();
@@ -38,6 +49,52 @@ function ensureLeaveGuardStyles() {
   const style = document.createElement("style");
   style.id = LEAVE_GUARD_STYLE_ID;
   style.textContent = `
+    #${ACTIVE_BANNER_ID} {
+      display: block !important;
+      position: relative !important;
+      visibility: visible !important;
+      opacity: 1 !important;
+      z-index: 2147483647 !important;
+      width: 100% !important;
+      height: auto !important;
+      margin: 0;
+      padding: 6px 12px;
+      background: #f8f9fa !important;
+      border: 1px solid #dee2e6 !important;
+      border-radius: 0.25rem !important;
+      color: #212529 !important;
+      font-size: 0.9rem !important;
+      font-weight: 700 !important;
+      line-height: 1.4 !important;
+      text-align: center;
+    }
+
+    #${ACTIVE_BANNER_ID} p {
+      display: block !important;
+      margin: 0 !important;
+      color: #212529 !important;
+      font-size: inherit !important;
+      font-weight: inherit !important;
+      line-height: inherit !important;
+    }
+
+    #${GRADE_BACKEND_LOADING_ID} {
+      display: none;
+      width: 100%;
+      margin: 0 0 0.75rem;
+      padding: 0.5rem 0.75rem;
+      background: #f8f9fa !important;
+      border: 1px solid #dee2e6 !important;
+      border-radius: 0.25rem;
+      color: #495057 !important;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+
+    #${GRADE_BACKEND_LOADING_ID}.${GRADE_BACKEND_STATUS_CLASS} {
+      display: block;
+    }
+
     #${UNSUBMITTED_BANNER_ID} {
       display: inline-block;
       margin-left: 10px;
@@ -48,6 +105,41 @@ function ensureLeaveGuardStyles() {
       font-size: 0.85rem;
       font-weight: 700;
       vertical-align: middle;
+    }
+
+    .${UNSUBMITTED_FIELD_CLASS} {
+      outline: 3px solid #f0ad00 !important;
+      outline-offset: 1px;
+      background-color: #fff3b0 !important;
+      box-shadow: 0 0 0 2px rgb(255 255 255 / 90%), 0 0 0 4px #f0ad00 !important;
+    }
+
+    #${UNSUBMITTED_TOOLTIP_ID} {
+      position: fixed;
+      z-index: 2147483647;
+      max-width: min(320px, calc(100vw - 24px));
+      padding: 6px 9px;
+      border: 1px solid #856404;
+      border-radius: 4px;
+      background: #fff3cd;
+      color: #664d03;
+      box-shadow: 0 4px 12px rgb(0 0 0 / 20%);
+      font-size: 0.82rem;
+      line-height: 1.3;
+      pointer-events: none;
+    }
+
+    #${UNSUBMITTED_TOOLTIP_ID}::after {
+      position: absolute;
+      bottom: -7px;
+      left: 50%;
+      width: 12px;
+      height: 12px;
+      border-right: 1px solid #856404;
+      border-bottom: 1px solid #856404;
+      background: #fff3cd;
+      content: "";
+      transform: translateX(-50%) rotate(45deg);
     }
 
     #${LEAVE_GUARD_MODAL_ID} {
@@ -123,6 +215,78 @@ function ensureLeaveGuardStyles() {
   document.head.appendChild(style);
 }
 
+function ensureActiveBanner() {
+  document.getElementById(LEGACY_ACTIVE_BANNER_ID)?.remove();
+
+  let banner = document.getElementById(ACTIVE_BANNER_ID);
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = ACTIVE_BANNER_ID;
+    banner.setAttribute("aria-label", "breadcrumb navigation");
+    banner.className = "w-100 bg-light";
+    banner.innerHTML = "<p>WebWorKMAX is active</p>";
+    banner.style.setProperty("display", "block", "important");
+    banner.style.setProperty("visibility", "visible", "important");
+    banner.style.setProperty("opacity", "1", "important");
+    banner.style.setProperty("position", "relative", "important");
+    banner.style.setProperty("z-index", "2147483647", "important");
+  }
+
+  const breadcrumb = document.getElementById("breadcrumb-navigation");
+  const breadcrumbRow = breadcrumb?.parentElement?.parentElement;
+  if (breadcrumbRow) {
+    let bannerColumn = banner.parentElement;
+    if (!bannerColumn?.classList.contains("webworkmax-banner-column")) {
+      bannerColumn = document.createElement("div");
+      bannerColumn.className = "col-12 d-flex align-items-center webworkmax-banner-column";
+      bannerColumn.appendChild(banner);
+    }
+    breadcrumbRow.insertBefore(bannerColumn, breadcrumb.parentElement);
+  } else if (!banner.parentElement) {
+    document.body.prepend(banner);
+  }
+
+  return banner;
+}
+
+function ensureGradeBackendLoadingBanner(form) {
+  let banner = document.getElementById(GRADE_BACKEND_LOADING_ID);
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = GRADE_BACKEND_LOADING_ID;
+    banner.textContent = "Loading backup grades backend (can take about 60 seconds)";
+  }
+
+  const tableContainer = form.querySelector(".table-responsive") || form.querySelector("table");
+  if (tableContainer?.parentElement && banner.parentElement !== tableContainer.parentElement) {
+    tableContainer.parentElement.insertBefore(banner, tableContainer);
+  }
+
+  return banner;
+}
+
+function setGradeBackendStatus(form, status) {
+  const banner = ensureGradeBackendLoadingBanner(form);
+  if (!gradeBackendStatusEnabled || !status) {
+    banner.classList.remove(GRADE_BACKEND_STATUS_CLASS);
+    banner.style.display = "none";
+    return;
+  }
+
+  const messages = {
+    loading: "Loading backup grades backend (can take about 60 seconds)",
+    available: "Backup Grades Available",
+    unavailable: "Backup Grades Unavailable",
+    notSetup: "Backend Not Yet Setup",
+  };
+  banner.textContent = messages[status];
+  banner.classList.add(GRADE_BACKEND_STATUS_CLASS);
+}
+
+function setGradeBackendLoading(form, isLoading) {
+  setGradeBackendStatus(form, isLoading ? "loading" : null);
+}
+
 function ensureUnsubmittedBanner() {
   const title = document.getElementById("page-title");
   if (!title) {
@@ -178,7 +342,119 @@ function refreshUnsubmittedState() {
 
   const currentValues = collectAutosaveValues();
   const currentSignature = serializeAutosaveValues(currentValues);
+  updateUnsubmittedFieldHighlights(currentValues);
   setUnsubmittedLocalChanges(currentSignature !== baselineFormValuesSignature);
+}
+
+function updateUnsubmittedFieldHighlights(currentValues) {
+  const form = document.getElementById("problem-grader-form");
+  if (!form || !currentValues || !baselineAutosaveValues) {
+    return;
+  }
+
+  for (const field of form.querySelectorAll("textarea, select, input")) {
+    if (!isAutosaveField(field)) {
+      continue;
+    }
+
+    const key = getAutosaveFieldKey(field);
+    if (!key) {
+      continue;
+    }
+
+    const isChanged =
+      !Object.hasOwn(baselineAutosaveValues, key) ||
+      JSON.stringify(currentValues[key]) !== JSON.stringify(baselineAutosaveValues[key]);
+    field.classList.toggle(UNSUBMITTED_FIELD_CLASS, isChanged);
+  }
+
+  const tooltip = document.getElementById(UNSUBMITTED_TOOLTIP_ID);
+  if (tooltip && !tooltip.dataset.fieldName) {
+    return;
+  }
+
+  if (tooltip?.dataset.fieldName) {
+    const field = Array.from(form.querySelectorAll("textarea, select, input")).find(
+      (candidate) => getAutosaveFieldKey(candidate) === tooltip.dataset.fieldName,
+    );
+    if (!field?.classList.contains(UNSUBMITTED_FIELD_CLASS)) {
+      hideUnsubmittedTooltip();
+    }
+  }
+}
+
+function formatSubmittedValue(value) {
+  if (value === undefined || value === null || value === "") {
+    return "(empty)";
+  }
+
+  if (typeof value === "boolean") {
+    return value ? "checked" : "unchecked";
+  }
+
+  return `${value}`;
+}
+
+function hideUnsubmittedTooltip() {
+  const tooltip = document.getElementById(UNSUBMITTED_TOOLTIP_ID);
+  if (tooltip) {
+    tooltip.remove();
+  }
+}
+
+function showUnsubmittedTooltip(field) {
+  if (!field?.classList.contains(UNSUBMITTED_FIELD_CLASS) || !baselineAutosaveValues) {
+    hideUnsubmittedTooltip();
+    return;
+  }
+
+  const key = getAutosaveFieldKey(field);
+  if (!key) {
+    return;
+  }
+
+  hideUnsubmittedTooltip();
+  const tooltip = document.createElement("div");
+  tooltip.id = UNSUBMITTED_TOOLTIP_ID;
+  tooltip.dataset.fieldName = key;
+  tooltip.textContent = `Submitted WebWorK Value: ${formatSubmittedValue(baselineAutosaveValues[key])}`;
+  document.body.appendChild(tooltip);
+
+  const fieldRect = field.getBoundingClientRect();
+  const tooltipRect = tooltip.getBoundingClientRect();
+  const left = Math.min(
+    Math.max(12, fieldRect.left + (fieldRect.width - tooltipRect.width) / 2),
+    window.innerWidth - tooltipRect.width - 12,
+  );
+  const top = Math.max(8, fieldRect.top - tooltipRect.height - 10);
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function handleUnsubmittedFieldMouseOver(event) {
+  const field = event.target?.closest?.("textarea, select, input");
+  if (field?.classList.contains(UNSUBMITTED_FIELD_CLASS)) {
+    showUnsubmittedTooltip(field);
+  }
+}
+
+function handleUnsubmittedFieldMouseOut(event) {
+  const field = event.target?.closest?.("textarea, select, input");
+  if (!field || field.contains(event.relatedTarget)) {
+    return;
+  }
+
+  hideUnsubmittedTooltip();
+}
+
+function initUnsubmittedFieldTooltipHandlers(form) {
+  if (form.dataset.webworkmaxTooltipBound === "true") {
+    return;
+  }
+
+  form.dataset.webworkmaxTooltipBound = "true";
+  form.addEventListener("mouseover", handleUnsubmittedFieldMouseOver, true);
+  form.addEventListener("mouseout", handleUnsubmittedFieldMouseOut, true);
 }
 
 function ensureLeaveGuardModal() {
@@ -290,6 +566,7 @@ function handleDocumentNavigationClick(event) {
   event.preventDefault();
   persistAutosaveSnapshot();
   openLeaveGuardModal(() => {
+    isSubmittingGraderForm = true;
     window.location.href = link.href;
   });
 }
@@ -301,12 +578,31 @@ function handleDocumentFormSubmit(event) {
   }
 
   if (form.id === "problem-grader-form") {
-    isSubmittingGraderForm = true;
-    window.clearTimeout(localAutosaveTimer);
-    const submitValues = collectAutosaveValues();
-    baselineFormValuesSignature = serializeAutosaveValues(submitValues);
-    setUnsubmittedLocalChanges(false);
-    clearLocalAutosaveForCurrentProblem();
+    event.preventDefault();
+    if (gradeSyncInProgress) {
+      return;
+    }
+
+    gradeSyncInProgress = true;
+    synchronizeGradesBeforeSubmit(form)
+      .then(() => {
+        isSubmittingGraderForm = true;
+        window.clearTimeout(localAutosaveTimer);
+        const submitValues = collectAutosaveValues();
+        baselineAutosaveValues = submitValues;
+        baselineFormValuesSignature = serializeAutosaveValues(submitValues);
+        updateUnsubmittedFieldHighlights(submitValues);
+        setUnsubmittedLocalChanges(false);
+        clearLocalAutosaveForCurrentProblem();
+        form.submit();
+      })
+      .catch((error) => {
+        console.error("WeBWorKMAX grade synchronization failed", error);
+        window.alert(`Grades were not submitted: ${error.message}`);
+      })
+      .finally(() => {
+        gradeSyncInProgress = false;
+      });
     return;
   }
 
@@ -320,6 +616,197 @@ function handleDocumentFormSubmit(event) {
     isSubmittingGraderForm = true;
     form.submit();
   });
+}
+
+function getGradeBackendSettings() {
+    return new Promise((resolve, reject) => {
+      chrome.storage.local.get(GRADE_BACKEND_SETTINGS_KEY, (stored) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error("Could not read grade backend settings."));
+          return;
+        }
+
+        const settings = stored[GRADE_BACKEND_SETTINGS_KEY] || {};
+        const backendUrl = `${settings.backendUrl || ""}`.trim().replace(/\/+$/, "");
+        const apiKey = `${settings.apiKey || ""}`.trim();
+        const graderName = `${settings.graderName || ""}`.trim();
+
+        if (!backendUrl && !apiKey && !graderName) {
+          resolve(null);
+          return;
+        }
+
+        if (!backendUrl || !apiKey || !graderName) {
+          reject(new Error("Complete the grade backend URL, API key, and grader name in the extension settings."));
+          return;
+        }
+
+        resolve({ backendUrl, apiKey, graderName });
+      });
+    });
+  }
+
+function getCurrentGradeContext() {
+    const parts = window.location.pathname.split("/").filter(Boolean);
+    if (parts.length < 6) {
+      throw new Error("Could not determine the current course, assignment, and problem.");
+    }
+
+    return {
+      courseId: decodeURIComponent(parts[1]),
+      setId: decodeURIComponent(parts[4]),
+      problemId: decodeURIComponent(parts[5]),
+    };
+  }
+
+function getScoreInputs(form) {
+    return Array.from(form.querySelectorAll("input.score-selector, select.score-selector")).filter((input) => {
+      return /^.+\.\d+\.score$/.test(input.name);
+    });
+  }
+
+function getStudentIdFromScoreInput(input) {
+    return input.name.replace(/\.\d+\.score$/, "");
+  }
+
+  async function encodeStudentId(studentId, apiKey) {
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(apiKey),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"],
+    );
+    const signature = await crypto.subtle.sign(
+      "HMAC",
+      keyMaterial,
+      new TextEncoder().encode(studentId),
+    );
+    return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  function getNumericScore(input) {
+    const score = Number(input.value);
+    return Number.isFinite(score) && score >= 0 && score <= 100 ? score : null;
+  }
+
+async function fetchLatestGrades(settings, context) {
+    const query = new URLSearchParams(context);
+    const response = await fetch(`${settings.backendUrl}/api/grades/latest?${query}`, {
+      headers: { Authorization: `Bearer ${settings.apiKey}` },
+    });
+
+    if (!response.ok) {
+      throw new Error(`The grade backend returned HTTP ${response.status}.`);
+    }
+
+    const payload = await response.json();
+    return new Map((payload.grades || []).map((grade) => [grade.studentIdHash, grade]));
+  }
+
+async function recordGradeEvents(settings, events) {
+    if (events.length === 0) {
+      return;
+    }
+
+    const response = await fetch(`${settings.backendUrl}/api/grades/events`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${settings.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ events }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`The grade backend returned HTTP ${response.status}.`);
+    }
+  }
+
+async function synchronizeGradesBeforeSubmit(form) {
+  const settings = await getGradeBackendSettings();
+  if (!settings) {
+    isSubmittingGraderForm = true;
+    return;
+  }
+
+  setGradeBackendLoading(form, true);
+  let backendAvailable = false;
+  try {
+    const context = getCurrentGradeContext();
+    const latestGrades = await fetchLatestGrades(settings, context);
+    backendAvailable = true;
+    const events = [];
+
+    for (const input of getScoreInputs(form)) {
+      const studentId = getStudentIdFromScoreInput(input);
+      const studentIdHash = await encodeStudentId(studentId, settings.apiKey);
+      const currentGrade = getNumericScore(input);
+      if (currentGrade === null) {
+        continue;
+      }
+
+      const initialGrade = initialScoreValues.get(input.name);
+      const locallyEdited = `${currentGrade}` !== `${initialGrade ?? ""}`;
+      const latest = latestGrades.get(studentIdHash);
+      const latestGrade = latest ? Number(latest.newGrade) : null;
+      const previousGrade = latestGrade ?? (initialGrade === undefined ? null : Number(initialGrade));
+
+      if (!locallyEdited && latestGrade !== null && currentGrade !== latestGrade) {
+        input.value = `${latestGrade}`;
+        continue;
+      }
+
+      if (!locallyEdited || currentGrade === latestGrade) {
+        continue;
+      }
+
+      if (currentGrade === 0 && previousGrade > 0) {
+        const confirmed = window.confirm(
+          `${studentId} has a previous grade of ${previousGrade}. Are you sure you want to overwrite it with 0?`,
+        );
+        if (!confirmed) {
+          throw new Error("Submission cancelled.");
+        }
+      }
+
+      events.push({
+        ...context,
+        studentIdHash,
+        graderName: settings.graderName,
+        previousGrade,
+        newGrade: currentGrade,
+      });
+    }
+
+    await recordGradeEvents(settings, events);
+    isSubmittingGraderForm = true;
+  } finally {
+    setGradeBackendStatus(form, backendAvailable ? "available" : "unavailable");
+  }
+}
+
+async function checkGradeBackendAvailability(form) {
+  let settings;
+  try {
+    settings = await getGradeBackendSettings();
+  } catch {
+    setGradeBackendStatus(form, "unavailable");
+    return;
+  }
+
+  if (!settings) {
+    setGradeBackendStatus(form, "notSetup");
+    return;
+  }
+
+  setGradeBackendLoading(form, true);
+  try {
+    await fetchLatestGrades(settings, getCurrentGradeContext());
+    setGradeBackendStatus(form, "available");
+  } catch {
+    setGradeBackendStatus(form, "unavailable");
+  }
 }
 
 function isAutosaveField(element) {
@@ -499,21 +986,26 @@ function initLocalAutosave() {
   }
 
   localAutosaveInitialized = true;
+  initialScoreValues = new Map(
+    getScoreInputs(form).map((input) => [input.name, input.value]),
+  );
   ensureLeaveGuardStyles();
   ensureUnsubmittedBanner();
   ensureLeaveGuardModal();
   baselineFormValuesSignature = serializeAutosaveValues(collectAutosaveValues());
+  baselineAutosaveValues = collectAutosaveValues();
   restoreAutosaveSnapshot();
 
   form.addEventListener("input", scheduleAutosaveSnapshot, true);
   form.addEventListener("change", scheduleAutosaveSnapshot, true);
+  initUnsubmittedFieldTooltipHandlers(form);
   document.addEventListener("click", handleDocumentNavigationClick, true);
   document.addEventListener("submit", handleDocumentFormSubmit, true);
   window.addEventListener("beforeunload", handlePageLeaveAttempt);
 }
 
 function isTargetGradingPage(url = window.location) {
-  if (url.hostname !== "webwork3.charlotte.edu") {
+  if (!/^webwork[23]\.charlotte\.edu$/.test(url.hostname)) {
     return false;
   }
 
@@ -584,7 +1076,7 @@ function getScoreColumnIndex(table) {
 
   const rows = table.rows;
   for (const row of rows) {
-    const scoreControl = row.querySelector("select.score-selector");
+    const scoreControl = row.querySelector("select.score-selector, input.score-selector");
     if (scoreControl) {
       const scoreCell = scoreControl.closest("td");
       if (scoreCell) {
@@ -655,7 +1147,7 @@ function restoreGradingCells(row) {
   const scoreColumnIndex = getScoreColumnIndex(table);
   clearScoreColumnWidth(table, scoreColumnIndex);
 
-  const scoreControl = row.querySelector("select.score-selector");
+  const scoreControl = row.querySelector("select.score-selector, input.score-selector");
   const checkboxControl = row.querySelector('input.mark_correct[type="checkbox"]');
   const commentTextarea = row.querySelector('textarea[name$=".comment"]');
 
@@ -691,7 +1183,7 @@ function applyGradingCells(row) {
   const scoreColumnIndex = getScoreColumnIndex(table);
   setScoreColumnWidth(table, scoreColumnIndex);
 
-  const scoreControl = row.querySelector("select.score-selector");
+  const scoreControl = row.querySelector("select.score-selector, input.score-selector");
   const checkboxControl = row.querySelector('input.mark_correct[type="checkbox"]');
   const commentTextarea = row.querySelector('textarea[name$=".comment"]');
 
@@ -854,6 +1346,7 @@ function restoreCommentRow(row) {
 
   const button =
     row.querySelector('input[type="button"][name$=".preview"]') ||
+    row.querySelector("button.latexentry-preview") ||
     row.querySelector('input[type="button"]');
 
   if (button) {
@@ -864,7 +1357,11 @@ function restoreCommentRow(row) {
     }
 
     const originalLabel = originalButtonLabels.get(button) || "Preview";
-    button.value = originalLabel;
+    if (button.tagName === "BUTTON") {
+      button.textContent = originalLabel;
+    } else {
+      button.value = originalLabel;
+    }
     button.classList.add("preview");
     delete button.dataset.webworkmaxEnlargeBound;
   }
@@ -888,14 +1385,20 @@ function enhanceCommentRow(row) {
 
   const previewButton =
     row.querySelector('input.preview[type="button"]') ||
-    row.querySelector('input[type="button"][name$=".preview"]');
+    row.querySelector('input[type="button"][name$=".preview"]') ||
+    row.querySelector("button.latexentry-preview");
 
   if (!previewButton) {
     return;
   }
 
   if (!originalButtonLabels.has(previewButton)) {
-    originalButtonLabels.set(previewButton, previewButton.value || "Preview");
+    originalButtonLabels.set(
+      previewButton,
+      previewButton.tagName === "BUTTON"
+        ? previewButton.textContent.trim() || "Preview"
+        : previewButton.value || "Preview",
+    );
   }
 
   if (!textareaHomes.has(textarea)) {
@@ -919,7 +1422,11 @@ function enhanceCommentRow(row) {
     nextElement.style.display = "none";
   }
 
-  previewButton.value = "Comment";
+  if (previewButton.tagName === "BUTTON") {
+    previewButton.textContent = "Comment";
+  } else {
+    previewButton.value = "Comment";
+  }
   previewButton.classList.remove("preview");
   previewButton.dataset.webworkmaxEnlargeBound = "true";
 
@@ -935,12 +1442,20 @@ function enhanceCommentRow(row) {
 
     if (expandedRows.has(textarea)) {
       hideExpandedCommentTextarea(textarea);
-      previewButton.value = "Comment";
+      if (previewButton.tagName === "BUTTON") {
+        previewButton.textContent = "Comment";
+      } else {
+        previewButton.value = "Comment";
+      }
       return;
     }
 
       showExpandedCommentTextarea(row, textarea, true);
-    previewButton.value = "Hide";
+    if (previewButton.tagName === "BUTTON") {
+      previewButton.textContent = "Hide";
+    } else {
+      previewButton.value = "Hide";
+    }
   };
 
   previewButtonHandlers.set(previewButton, toggleCommentHandler);
@@ -949,7 +1464,11 @@ function enhanceCommentRow(row) {
 
   if (textarea.value.trim().length > 0) {
     showExpandedCommentTextarea(row, textarea, false);
-    previewButton.value = "Hide";
+    if (previewButton.tagName === "BUTTON") {
+      previewButton.textContent = "Hide";
+    } else {
+      previewButton.value = "Hide";
+    }
   }
 
   row.dataset.webworkmaxCommentEnhanced = "true";
@@ -1003,11 +1522,17 @@ function teardownCommentEnhancer() {
 }
 
 function applyCosmetics(enabled) {
+  gradeBackendStatusEnabled = Boolean(enabled);
   document.documentElement.classList.toggle("webworkmax-cosmetics-enabled", Boolean(enabled));
 
   if (enabled) {
     initCommentEnhancer();
   } else {
+    const statusBanner = document.getElementById(GRADE_BACKEND_LOADING_ID);
+    if (statusBanner) {
+      statusBanner.classList.remove(GRADE_BACKEND_STATUS_CLASS);
+      statusBanner.style.display = "none";
+    }
     teardownCommentEnhancer();
   }
 }
@@ -1018,10 +1543,21 @@ function syncFromSettings(settings) {
   }
 
   applyCosmetics(settings.cosmeticsEnabled);
+  const form = document.getElementById("problem-grader-form");
+  if (form) {
+    void checkGradeBackendAvailability(form);
+  }
 }
 
 function init() {
-  if (!isTargetGradingPage() || !chrome?.storage?.sync) {
+  if (!isTargetGradingPage()) {
+    return;
+  }
+
+  ensureLeaveGuardStyles();
+  ensureActiveBanner();
+
+  if (!chrome?.storage?.sync) {
     return;
   }
 
@@ -1044,7 +1580,14 @@ function init() {
       return;
     }
 
-    applyCosmetics(changes.cosmeticsEnabled.newValue);
+    const enabled = Boolean(changes.cosmeticsEnabled.newValue);
+    applyCosmetics(enabled);
+    if (enabled) {
+      const form = document.getElementById("problem-grader-form");
+      if (form) {
+        void checkGradeBackendAvailability(form);
+      }
+    }
   });
 }
 

@@ -67,6 +67,15 @@ body {
   background: #fff;
 }
 
+.text-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  background: #fff;
+}
+
 .view-button {
   width: 100%;
   padding: 8px 10px;

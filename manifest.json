@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WeBWorKMAX",
-  "version": "1.0",
+  "version": "1.0.1",
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -12,12 +12,19 @@
     "default_title": "WeBWorKMAX Extension"
   },
   "permissions": ["activeTab", "storage", "alarms"],
+  "host_permissions": [
+    "https://webwork2.charlotte.edu/*",
+    "https://webwork3.charlotte.edu/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
-      "matches": ["https://webwork3.charlotte.edu/webwork2/*/instructor/grader/*"],
+      "matches": [
+        "https://webwork2.charlotte.edu/*",
+        "https://webwork3.charlotte.edu/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

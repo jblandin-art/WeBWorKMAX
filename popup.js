@@ -1,14 +1,18 @@
 const DEFAULT_SETTINGS = {
-  cosmeticsEnabled: false,
+  cosmeticsEnabled: true,
 };
 
 const AUTOSAVE_STORAGE_PREFIX = "webworkmaxAutosave:";
 const COSMETICS_KEY = "cosmeticsEnabled";
+const GRADE_BACKEND_SETTINGS_KEY = "webworkmaxGradeBackendSettings";
 
 const viewAutosaveButton = document.getElementById("viewAutosaveButton");
 const autosaveInfoEl = document.getElementById("autosaveInfo");
 const cosmeticsToggle = document.getElementById("cosmeticsEnabled");
 const statusEl = document.getElementById("status");
+const backendUrlInput = document.getElementById("backendUrl");
+const gradeApiKeyInput = document.getElementById("gradeApiKey");
+const graderNameInput = document.getElementById("graderName");
 
 function showStatus(message, isError = false) {
   statusEl.textContent = message;
@@ -40,6 +44,40 @@ function saveSettings() {
   });
 }
 
+function loadGradeBackendSettings() {
+  chrome.storage.local.get(GRADE_BACKEND_SETTINGS_KEY, (stored) => {
+    if (chrome.runtime.lastError) {
+      showStatus("Could not load backend settings", true);
+      return;
+    }
+
+    const settings = stored[GRADE_BACKEND_SETTINGS_KEY] || {};
+    backendUrlInput.value = settings.backendUrl || "";
+    gradeApiKeyInput.value = settings.apiKey || "";
+    graderNameInput.value = settings.graderName || "";
+  });
+}
+
+function saveGradeBackendSettings() {
+  chrome.storage.local.set(
+    {
+      [GRADE_BACKEND_SETTINGS_KEY]: {
+        backendUrl: backendUrlInput.value.trim().replace(/\/+$/, ""),
+        apiKey: gradeApiKeyInput.value.trim(),
+        graderName: graderNameInput.value.trim(),
+      },
+    },
+    () => {
+      if (chrome.runtime.lastError) {
+        showStatus("Could not save backend settings", true);
+        return;
+      }
+
+      showStatus("Backend settings saved");
+    },
+  );
+}
+
 function getProblemAutosaveKeyFromUrl(urlString) {
   if (!urlString) {
     return null;
@@ -52,7 +90,7 @@ function getProblemAutosaveKeyFromUrl(urlString) {
     return null;
   }
 
-  if (url.hostname !== "webwork3.charlotte.edu") {
+  if (!/^webwork[23]\.charlotte\.edu$/.test(url.hostname)) {
     return null;
   }
 
@@ -101,6 +139,10 @@ function initPopup() {
   viewAutosaveButton.addEventListener("click", showAutosaveInfoForActiveTab);
 
   cosmeticsToggle.addEventListener("change", saveSettings);
+  backendUrlInput.addEventListener("change", saveGradeBackendSettings);
+  gradeApiKeyInput.addEventListener("change", saveGradeBackendSettings);
+  graderNameInput.addEventListener("change", saveGradeBackendSettings);
+  loadGradeBackendSettings();
 }
 
 if (!chrome?.storage?.sync) {

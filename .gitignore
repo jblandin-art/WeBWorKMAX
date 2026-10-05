@@ -1,1 +1,7 @@
 /zipped/
+/backend/node_modules/
+/.env.local
+/node_modules/
+.neon
+.env.local
+node_modules/

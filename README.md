@@ -24,7 +24,11 @@ Done.
 ## Use
 
 - Open a WeBWorK Manual Grader page.
+- The page displays a **WeBWorKMAX is active** banner when the extension is running.
 - Click the extension icon to access settings.
+- To share grades between graders, configure the Render backend URL, shared API
+  key, and your grader name in the extension popup. Backend deployment details
+  are in [`backend/README.md`](./backend/README.md).
 
 ## Update to a new release
 
