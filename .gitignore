@@ -2,6 +2,7 @@
 /backend/node_modules/
 /.env.local
 /node_modules/
+__pycache__/
 .neon
 .env.local
 node_modules/
