@@ -28,6 +28,7 @@ let pendingLeaveAction = null;
 let baselineFormValuesSignature = null;
 let baselineAutosaveValues = null;
 let gradeSyncInProgress = false;
+let allowGraderFormSubmit = false;
 let initialScoreValues = new Map();
 let gradeBackendStatusEnabled = DEFAULT_SETTINGS.cosmeticsEnabled;
 const textareaHomes = new WeakMap();
@@ -35,6 +36,13 @@ const expandedRows = new WeakMap();
 const originalButtonLabels = new WeakMap();
 const previewButtonHandlers = new WeakMap();
 let commentEnhancerObserver = null;
+
+class GradeSyncCancelledError extends Error {
+  constructor() {
+    super("Submission cancelled.");
+    this.name = "GradeSyncCancelledError";
+  }
+}
 
 function getProblemAutosaveKey(url = window.location) {
   const pathname = (url.pathname || "").replace(/\/+$/, "");
@@ -578,6 +586,12 @@ function handleDocumentFormSubmit(event) {
   }
 
   if (form.id === "problem-grader-form") {
+    if (allowGraderFormSubmit) {
+      allowGraderFormSubmit = false;
+      return;
+    }
+
+    const submitter = event.submitter;
     event.preventDefault();
     if (gradeSyncInProgress) {
       return;
@@ -594,7 +608,13 @@ function handleDocumentFormSubmit(event) {
         updateUnsubmittedFieldHighlights(submitValues);
         setUnsubmittedLocalChanges(false);
         clearLocalAutosaveForCurrentProblem();
-        form.submit();
+        allowGraderFormSubmit = true;
+        if (submitter && submitter.form === form) {
+          form.requestSubmit(submitter);
+        } else {
+          form.requestSubmit();
+        }
+        allowGraderFormSubmit = false;
       })
       .catch((error) => {
         console.error("WeBWorKMAX grade synchronization failed", error);
@@ -637,7 +657,7 @@ function getGradeBackendSettings() {
         }
 
         if (!backendUrl || !apiKey || !graderName) {
-          reject(new Error("Complete the grade backend URL, API key, and grader name in the extension settings."));
+          resolve(null);
           return;
         }
 
@@ -690,9 +710,18 @@ function getStudentIdFromScoreInput(input) {
     return Number.isFinite(score) && score >= 0 && score <= 100 ? score : null;
   }
 
+function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 10000);
+
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => {
+    window.clearTimeout(timeoutId);
+  });
+}
+
 async function fetchLatestGrades(settings, context) {
     const query = new URLSearchParams(context);
-    const response = await fetch(`${settings.backendUrl}/api/grades/latest?${query}`, {
+    const response = await fetchWithTimeout(`${settings.backendUrl}/api/grades/latest?${query}`, {
       headers: { Authorization: `Bearer ${settings.apiKey}` },
     });
 
@@ -709,7 +738,7 @@ async function recordGradeEvents(settings, events) {
       return;
     }
 
-    const response = await fetch(`${settings.backendUrl}/api/grades/events`, {
+    const response = await fetchWithTimeout(`${settings.backendUrl}/api/grades/events`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${settings.apiKey}`,
@@ -752,22 +781,34 @@ async function synchronizeGradesBeforeSubmit(form) {
       const latestGrade = latest ? Number(latest.newGrade) : null;
       const previousGrade = latestGrade ?? (initialGrade === undefined ? null : Number(initialGrade));
 
-      if (!locallyEdited && latestGrade !== null && currentGrade !== latestGrade) {
-        input.value = `${latestGrade}`;
+      const initialNumericGrade = initialGrade === undefined ? null : Number(initialGrade);
+      const nonZeroPreviousGrade =
+        latestGrade !== null && latestGrade > 0
+          ? latestGrade
+          : initialNumericGrade !== null && initialNumericGrade > 0
+            ? initialNumericGrade
+            : null;
+
+      if (currentGrade === 0 && nonZeroPreviousGrade !== null) {
+        const confirmed = window.confirm(
+          `${studentId} has a previous grade of ${nonZeroPreviousGrade}. Are you sure you want to overwrite it with 0?`,
+        );
+        if (!confirmed) {
+          throw new GradeSyncCancelledError();
+        }
+
+        events.push({
+          ...context,
+          studentIdHash,
+          graderName: settings.graderName,
+          previousGrade: nonZeroPreviousGrade,
+          newGrade: 0,
+        });
         continue;
       }
 
       if (!locallyEdited || currentGrade === latestGrade) {
         continue;
-      }
-
-      if (currentGrade === 0 && previousGrade > 0) {
-        const confirmed = window.confirm(
-          `${studentId} has a previous grade of ${previousGrade}. Are you sure you want to overwrite it with 0?`,
-        );
-        if (!confirmed) {
-          throw new Error("Submission cancelled.");
-        }
       }
 
       events.push({
@@ -780,6 +821,13 @@ async function synchronizeGradesBeforeSubmit(form) {
     }
 
     await recordGradeEvents(settings, events);
+    isSubmittingGraderForm = true;
+  } catch (error) {
+    if (error instanceof GradeSyncCancelledError) {
+      throw error;
+    }
+
+    console.error("WeBWorKMAX backup grade synchronization failed", error);
     isSubmittingGraderForm = true;
   } finally {
     setGradeBackendStatus(form, backendAvailable ? "available" : "unavailable");

@@ -50,6 +50,11 @@ The free Web Service may spin down after 15 minutes without traffic. Its next
 request can take about one minute while the service starts again. This is why
 the extension displays a backend loading status.
 
+The backup service is additive and best-effort. If it is unavailable, times
+out, or has incomplete configuration, WebWorKMAX allows the native WebWorK
+submission to continue and marks the backup grades as unavailable. WebWorK
+grading does not depend on this service.
+
 The Neon free database can scale to zero while idle and wake when queried.
 Neon’s free plan has storage and compute limits, so check its current plan
 details before relying on it for a large course.
