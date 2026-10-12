@@ -614,87 +614,6 @@ function handleDocumentFormSubmit(event) {
     return;
   }
 
-  function scheduleImmediateGradeBackendSync(input) {
-    const existingTimer = pendingGradeInputTimers.get(input);
-    if (existingTimer) {
-      window.clearTimeout(existingTimer);
-    }
-
-    const timer = window.setTimeout(() => {
-      pendingGradeInputTimers.delete(input);
-      const key = getAutosaveFieldKey(input);
-      if (!key) {
-        return;
-      }
-
-      const previousQueue = gradeInputSyncQueues.get(key) || Promise.resolve();
-      const nextQueue = previousQueue
-        .catch(() => {})
-        .then(() => synchronizeGradeInputImmediately(input));
-      gradeInputSyncQueues.set(key, nextQueue);
-      void nextQueue.finally(() => {
-        if (gradeInputSyncQueues.get(key) === nextQueue) {
-          gradeInputSyncQueues.delete(key);
-        }
-      });
-    }, 250);
-
-    pendingGradeInputTimers.set(input, timer);
-  }
-
-  async function synchronizeGradeInputImmediately(input) {
-    if (localAutosaveApplying || isSubmittingGraderForm) {
-      return;
-    }
-
-    const settings = await getGradeBackendSettings();
-    if (!settings) {
-      return;
-    }
-
-    const newGrade = getNumericScore(input);
-    if (newGrade === null) {
-      return;
-    }
-
-    const studentId = getStudentIdFromScoreInput(input);
-    const studentIdHash = await encodeStudentId(studentId, settings.apiKey);
-    const key = getAutosaveFieldKey(input);
-    const previousGrade = latestBackendGradeValues.get(key) ?? null;
-
-    if (newGrade === 0 && previousGrade !== null && previousGrade > 0) {
-      const confirmed = window.confirm(
-        `${studentId} has a previous backup grade of ${previousGrade}. Are you sure you want to overwrite it with 0?`,
-      );
-      if (!confirmed) {
-        localAutosaveApplying = true;
-        try {
-          input.value = `${previousGrade}`;
-        } finally {
-          localAutosaveApplying = false;
-        }
-        refreshUnsubmittedState();
-        return;
-      }
-    }
-
-    try {
-      await recordGradeEvents(settings, [{
-        ...getCurrentGradeContext(),
-        studentIdHash,
-        graderName: settings.graderName,
-        previousGrade,
-        newGrade,
-      }]);
-      latestBackendGradeValues.set(key, newGrade);
-      updateBackendMismatchForInput(input, newGrade);
-      setGradeBackendStatus(input.form, "available");
-    } catch (error) {
-      console.error("WeBWorKMAX immediate backup grade synchronization failed", error);
-      setGradeBackendStatus(input.form, "unavailable");
-    }
-  }
-
   if (form.id === "problem-grader-form") {
     if (allowGraderFormSubmit) {
       allowGraderFormSubmit = false;
@@ -749,6 +668,87 @@ function handleDocumentFormSubmit(event) {
   });
 }
 
+function scheduleImmediateGradeBackendSync(input) {
+  const existingTimer = pendingGradeInputTimers.get(input);
+  if (existingTimer) {
+    window.clearTimeout(existingTimer);
+  }
+
+  const timer = window.setTimeout(() => {
+    pendingGradeInputTimers.delete(input);
+    const key = getAutosaveFieldKey(input);
+    if (!key) {
+      return;
+    }
+
+    const previousQueue = gradeInputSyncQueues.get(key) || Promise.resolve();
+    const nextQueue = previousQueue
+      .catch(() => {})
+      .then(() => synchronizeGradeInputImmediately(input));
+    gradeInputSyncQueues.set(key, nextQueue);
+    void nextQueue.finally(() => {
+      if (gradeInputSyncQueues.get(key) === nextQueue) {
+        gradeInputSyncQueues.delete(key);
+      }
+    });
+  }, 250);
+
+  pendingGradeInputTimers.set(input, timer);
+}
+
+async function synchronizeGradeInputImmediately(input) {
+  if (localAutosaveApplying || isSubmittingGraderForm) {
+    return;
+  }
+
+  const settings = await getGradeBackendSettings();
+  if (!settings) {
+    return;
+  }
+
+  const newGrade = getNumericScore(input);
+  if (newGrade === null) {
+    return;
+  }
+
+  const studentId = getStudentIdFromScoreInput(input);
+  const studentIdHash = await encodeStudentId(studentId, settings.apiKey);
+  const key = getAutosaveFieldKey(input);
+  const previousGrade = latestBackendGradeValues.get(key) ?? null;
+
+  if (newGrade === 0 && previousGrade !== null && previousGrade > 0) {
+    const confirmed = window.confirm(
+      `${studentId} has a previous backup grade of ${previousGrade}. Are you sure you want to overwrite it with 0?`,
+    );
+    if (!confirmed) {
+      localAutosaveApplying = true;
+      try {
+        input.value = `${previousGrade}`;
+      } finally {
+        localAutosaveApplying = false;
+      }
+      refreshUnsubmittedState();
+      return;
+    }
+  }
+
+  try {
+    await recordGradeEvents(settings, [{
+      ...getCurrentGradeContext(),
+      studentIdHash,
+      graderName: settings.graderName,
+      previousGrade,
+      newGrade,
+    }]);
+    latestBackendGradeValues.set(key, newGrade);
+    updateBackendMismatchForInput(input, newGrade);
+    setGradeBackendStatus(input.form, "available");
+  } catch (error) {
+    console.error("WeBWorKMAX immediate backup grade synchronization failed", error);
+    setGradeBackendStatus(input.form, "unavailable");
+  }
+}
+
 function getGradeBackendSettings() {
     return new Promise((resolve, reject) => {
       chrome.storage.local.get(GRADE_BACKEND_SETTINGS_KEY, (stored) => {
@@ -784,8 +784,8 @@ function getCurrentGradeContext() {
     }
 
     return {
-      courseId: decodeURIComponent(parts[1]),
-      setId: decodeURIComponent(parts[4]),
+      courseId: decodeURIComponent(parts[1]).toLowerCase(),
+      setId: decodeURIComponent(parts[4]).toLowerCase(),
       problemId: decodeURIComponent(parts[5]),
     };
   }
@@ -1231,11 +1231,11 @@ function initLocalAutosave() {
 }
 
 function isTargetGradingPage(url = window.location) {
-  if (!/^webwork[23]\.charlotte\.edu$/.test(url.hostname)) {
+  if (!/^webwork[23]\.charlotte\.edu$/i.test(url.hostname)) {
     return false;
   }
 
-  return /^\/webwork2\/[^/]+\/instructor\/grader\//.test(url.pathname);
+  return /^\/webwork2\/[^/]+\/instructor\/grader\//i.test(url.pathname);
 }
 
 function ensureCommentEnhancerStyles() {

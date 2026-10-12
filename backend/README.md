@@ -82,6 +82,8 @@ The service exposes:
 
 Latest-grade responses identify students with `studentIdHash`. Grade event
 requests must contain `studentIdHash`, not a raw username or email address:
+course IDs, assignment IDs, and grader names are normalized to lowercase by
+the service.
 
 ```json
 {

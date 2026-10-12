@@ -26,6 +26,10 @@ The extension operates on Manual Grader pages hosted at:
 
 It does not modify unrelated websites or non-grader pages.
 
+Host and Manual Grader path recognition is case-insensitive. Course IDs,
+assignment IDs, and grader names are normalized to lowercase before they are
+sent to the backup backend.
+
 ## Install from a browser store
 
 Install the unlisted WeBWorKMAX listing using the private store link provided

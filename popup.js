@@ -64,7 +64,7 @@ function saveGradeBackendSettings() {
       [GRADE_BACKEND_SETTINGS_KEY]: {
         backendUrl: backendUrlInput.value.trim().replace(/\/+$/, ""),
         apiKey: gradeApiKeyInput.value.trim(),
-        graderName: graderNameInput.value.trim(),
+        graderName: graderNameInput.value.trim().toLowerCase(),
       },
     },
     () => {
@@ -90,11 +90,11 @@ function getProblemAutosaveKeyFromUrl(urlString) {
     return null;
   }
 
-  if (!/^webwork[23]\.charlotte\.edu$/.test(url.hostname)) {
+  if (!/^webwork[23]\.charlotte\.edu$/i.test(url.hostname)) {
     return null;
   }
 
-  if (!/^\/webwork2\/[^/]+\/instructor\/grader\//.test(url.pathname)) {
+  if (!/^\/webwork2\/[^/]+\/instructor\/grader\//i.test(url.pathname)) {
     return null;
   }
 

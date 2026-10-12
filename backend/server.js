@@ -73,6 +73,10 @@ function requireText(value, field) {
   return value.trim();
 }
 
+function requireLowercaseText(value, field) {
+  return requireText(value, field).toLowerCase();
+}
+
 function parseGrade(value, field, allowNull = false) {
   if (allowNull && (value === null || value === undefined || value === "")) {
     return null;
@@ -93,11 +97,11 @@ function requireStudentIdHash(value) {
 
 function validateEvent(event) {
   return {
-    courseId: requireText(event.courseId, "courseId"),
-    setId: requireText(event.setId, "setId"),
+    courseId: requireLowercaseText(event.courseId, "courseId"),
+    setId: requireLowercaseText(event.setId, "setId"),
     problemId: requireText(event.problemId, "problemId"),
     studentIdHash: requireStudentIdHash(event.studentIdHash),
-    graderName: requireText(event.graderName, "graderName"),
+    graderName: requireLowercaseText(event.graderName, "graderName"),
     previousGrade: parseGrade(event.previousGrade, "previousGrade", true),
     newGrade: parseGrade(event.newGrade, "newGrade"),
   };
@@ -125,8 +129,8 @@ async function handleRequest(request, response) {
   const url = new URL(request.url, `http://${request.headers.host}`);
 
   if (request.method === "GET" && url.pathname === "/api/grades/latest") {
-    const courseId = requireText(url.searchParams.get("courseId"), "courseId");
-    const setId = requireText(url.searchParams.get("setId"), "setId");
+    const courseId = requireLowercaseText(url.searchParams.get("courseId"), "courseId");
+    const setId = requireLowercaseText(url.searchParams.get("setId"), "setId");
     const problemId = requireText(url.searchParams.get("problemId"), "problemId");
     const result = await pool.query(
       `      SELECT DISTINCT ON (student_id_hash)
