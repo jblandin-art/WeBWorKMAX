@@ -30,6 +30,12 @@ let baselineAutosaveValues = null;
 let gradeSyncInProgress = false;
 let allowGraderFormSubmit = false;
 let initialScoreValues = new Map();
+let backendGradeValues = new Map();
+let latestBackendGradeValues = new Map();
+const pendingGradeInputTimers = new WeakMap();
+const gradeInputSyncQueues = new Map();
+let backendRefreshTimer = null;
+let backendRefreshInProgress = false;
 let gradeBackendStatusEnabled = DEFAULT_SETTINGS.cosmeticsEnabled;
 const textareaHomes = new WeakMap();
 const expandedRows = new WeakMap();
@@ -360,6 +366,22 @@ function updateUnsubmittedFieldHighlights(currentValues) {
     return;
   }
 
+  function updateBackendMismatchForInput(input, backendGrade) {
+    const key = getAutosaveFieldKey(input);
+    if (!key) {
+      return;
+    }
+
+    const webworkGrade = baselineAutosaveValues?.[key];
+    if (webworkGrade !== undefined && Number(webworkGrade) !== backendGrade) {
+      backendGradeValues.set(key, backendGrade);
+    } else {
+      backendGradeValues.delete(key);
+    }
+
+    updateUnsubmittedFieldHighlights(collectAutosaveValues());
+  }
+
   for (const field of form.querySelectorAll("textarea, select, input")) {
     if (!isAutosaveField(field)) {
       continue;
@@ -373,7 +395,8 @@ function updateUnsubmittedFieldHighlights(currentValues) {
     const isChanged =
       !Object.hasOwn(baselineAutosaveValues, key) ||
       JSON.stringify(currentValues[key]) !== JSON.stringify(baselineAutosaveValues[key]);
-    field.classList.toggle(UNSUBMITTED_FIELD_CLASS, isChanged);
+    const hasBackendMismatch = backendGradeValues.has(key);
+    field.classList.toggle(UNSUBMITTED_FIELD_CLASS, isChanged || hasBackendMismatch);
   }
 
   const tooltip = document.getElementById(UNSUBMITTED_TOOLTIP_ID);
@@ -411,7 +434,7 @@ function hideUnsubmittedTooltip() {
 }
 
 function showUnsubmittedTooltip(field) {
-  if (!field?.classList.contains(UNSUBMITTED_FIELD_CLASS) || !baselineAutosaveValues) {
+  if (!field?.classList.contains(UNSUBMITTED_FIELD_CLASS)) {
     hideUnsubmittedTooltip();
     return;
   }
@@ -425,7 +448,13 @@ function showUnsubmittedTooltip(field) {
   const tooltip = document.createElement("div");
   tooltip.id = UNSUBMITTED_TOOLTIP_ID;
   tooltip.dataset.fieldName = key;
-  tooltip.textContent = `Submitted WebWorK Value: ${formatSubmittedValue(baselineAutosaveValues[key])}`;
+  const submittedValue = baselineAutosaveValues
+    ? formatSubmittedValue(baselineAutosaveValues[key])
+    : formatSubmittedValue(field.value);
+  const backendValue = backendGradeValues.get(key);
+  tooltip.textContent = backendValue === undefined
+    ? `Submitted WebWorK Value: ${submittedValue}`
+    : `Submitted WebWorK Value: ${submittedValue}; Backup Grade Value: ${backendValue}`;
   document.body.appendChild(tooltip);
 
   const fieldRect = field.getBoundingClientRect();
@@ -585,6 +614,87 @@ function handleDocumentFormSubmit(event) {
     return;
   }
 
+  function scheduleImmediateGradeBackendSync(input) {
+    const existingTimer = pendingGradeInputTimers.get(input);
+    if (existingTimer) {
+      window.clearTimeout(existingTimer);
+    }
+
+    const timer = window.setTimeout(() => {
+      pendingGradeInputTimers.delete(input);
+      const key = getAutosaveFieldKey(input);
+      if (!key) {
+        return;
+      }
+
+      const previousQueue = gradeInputSyncQueues.get(key) || Promise.resolve();
+      const nextQueue = previousQueue
+        .catch(() => {})
+        .then(() => synchronizeGradeInputImmediately(input));
+      gradeInputSyncQueues.set(key, nextQueue);
+      void nextQueue.finally(() => {
+        if (gradeInputSyncQueues.get(key) === nextQueue) {
+          gradeInputSyncQueues.delete(key);
+        }
+      });
+    }, 250);
+
+    pendingGradeInputTimers.set(input, timer);
+  }
+
+  async function synchronizeGradeInputImmediately(input) {
+    if (localAutosaveApplying || isSubmittingGraderForm) {
+      return;
+    }
+
+    const settings = await getGradeBackendSettings();
+    if (!settings) {
+      return;
+    }
+
+    const newGrade = getNumericScore(input);
+    if (newGrade === null) {
+      return;
+    }
+
+    const studentId = getStudentIdFromScoreInput(input);
+    const studentIdHash = await encodeStudentId(studentId, settings.apiKey);
+    const key = getAutosaveFieldKey(input);
+    const previousGrade = latestBackendGradeValues.get(key) ?? null;
+
+    if (newGrade === 0 && previousGrade !== null && previousGrade > 0) {
+      const confirmed = window.confirm(
+        `${studentId} has a previous backup grade of ${previousGrade}. Are you sure you want to overwrite it with 0?`,
+      );
+      if (!confirmed) {
+        localAutosaveApplying = true;
+        try {
+          input.value = `${previousGrade}`;
+        } finally {
+          localAutosaveApplying = false;
+        }
+        refreshUnsubmittedState();
+        return;
+      }
+    }
+
+    try {
+      await recordGradeEvents(settings, [{
+        ...getCurrentGradeContext(),
+        studentIdHash,
+        graderName: settings.graderName,
+        previousGrade,
+        newGrade,
+      }]);
+      latestBackendGradeValues.set(key, newGrade);
+      updateBackendMismatchForInput(input, newGrade);
+      setGradeBackendStatus(input.form, "available");
+    } catch (error) {
+      console.error("WeBWorKMAX immediate backup grade synchronization failed", error);
+      setGradeBackendStatus(input.form, "unavailable");
+    }
+  }
+
   if (form.id === "problem-grader-form") {
     if (allowGraderFormSubmit) {
       allowGraderFormSubmit = false;
@@ -605,8 +715,9 @@ function handleDocumentFormSubmit(event) {
         const submitValues = collectAutosaveValues();
         baselineAutosaveValues = submitValues;
         baselineFormValuesSignature = serializeAutosaveValues(submitValues);
-        updateUnsubmittedFieldHighlights(submitValues);
         setUnsubmittedLocalChanges(false);
+        backendGradeValues = new Map();
+        updateUnsubmittedFieldHighlights(submitValues);
         clearLocalAutosaveForCurrentProblem();
         allowGraderFormSubmit = true;
         if (submitter && submitter.form === form) {
@@ -765,6 +876,7 @@ async function synchronizeGradesBeforeSubmit(form) {
     const context = getCurrentGradeContext();
     const latestGrades = await fetchLatestGrades(settings, context);
     backendAvailable = true;
+    await reconcileBackendGrades(form, settings, latestGrades);
     const events = [];
 
     for (const input of getScoreInputs(form)) {
@@ -835,26 +947,83 @@ async function synchronizeGradesBeforeSubmit(form) {
 }
 
 async function checkGradeBackendAvailability(form) {
+  if (backendRefreshInProgress) {
+    return;
+  }
+
+  backendRefreshInProgress = true;
   let settings;
   try {
     settings = await getGradeBackendSettings();
   } catch {
     setGradeBackendStatus(form, "unavailable");
+    backendRefreshInProgress = false;
     return;
   }
 
   if (!settings) {
     setGradeBackendStatus(form, "notSetup");
+    backendRefreshInProgress = false;
     return;
   }
 
   setGradeBackendLoading(form, true);
   try {
-    await fetchLatestGrades(settings, getCurrentGradeContext());
+    const latestGrades = await fetchLatestGrades(settings, getCurrentGradeContext());
+    await reconcileBackendGrades(form, settings, latestGrades);
     setGradeBackendStatus(form, "available");
   } catch {
+    backendGradeValues = new Map();
+    latestBackendGradeValues = new Map();
+    updateUnsubmittedFieldHighlights(collectAutosaveValues());
     setGradeBackendStatus(form, "unavailable");
+  } finally {
+    backendRefreshInProgress = false;
   }
+}
+
+function startBackendRefresh(form) {
+  if (backendRefreshTimer !== null) {
+    window.clearInterval(backendRefreshTimer);
+  }
+
+  backendRefreshTimer = window.setInterval(() => {
+    if (!isSubmittingGraderForm && !gradeSyncInProgress) {
+      void checkGradeBackendAvailability(form);
+    }
+  }, 15000);
+}
+
+async function reconcileBackendGrades(form, settings, latestGrades) {
+  const nextBackendGradeValues = new Map();
+  const nextLatestBackendGradeValues = new Map();
+  for (const input of getScoreInputs(form)) {
+    const studentId = getStudentIdFromScoreInput(input);
+    const studentIdHash = await encodeStudentId(studentId, settings.apiKey);
+    const latest = latestGrades.get(studentIdHash);
+    if (!latest) {
+      continue;
+    }
+
+    const latestGrade = Number(latest.newGrade);
+    const key = getAutosaveFieldKey(input);
+    nextLatestBackendGradeValues.set(key, latestGrade);
+    const webworkGrade = baselineAutosaveValues?.[key];
+    if (webworkGrade !== undefined && Number(webworkGrade) !== latestGrade) {
+      nextBackendGradeValues.set(key, latestGrade);
+    }
+
+    localAutosaveApplying = true;
+    try {
+      input.value = `${latestGrade}`;
+    } finally {
+      localAutosaveApplying = false;
+    }
+  }
+
+  backendGradeValues = nextBackendGradeValues;
+  latestBackendGradeValues = nextLatestBackendGradeValues;
+  updateUnsubmittedFieldHighlights(collectAutosaveValues());
 }
 
 function isAutosaveField(element) {
@@ -957,6 +1126,7 @@ function applyAutosaveSnapshot(snapshot) {
       }
 
       const nextValue = snapshot.values[key];
+      const backendValue = latestBackendGradeValues.get(key);
       if (field.tagName === "INPUT") {
         const type = (field.type || "").toLowerCase();
         if (type === "checkbox" || type === "radio") {
@@ -965,7 +1135,7 @@ function applyAutosaveSnapshot(snapshot) {
         }
       }
 
-      field.value = `${nextValue ?? ""}`;
+      field.value = `${backendValue ?? nextValue ?? ""}`;
     }
   } finally {
     localAutosaveApplying = false;
@@ -1046,6 +1216,14 @@ function initLocalAutosave() {
 
   form.addEventListener("input", scheduleAutosaveSnapshot, true);
   form.addEventListener("change", scheduleAutosaveSnapshot, true);
+  const handleImmediateGradeChange = (event) => {
+    const input = event.target?.closest?.("input.score-selector, select.score-selector");
+    if (input && getScoreInputs(form).includes(input)) {
+      scheduleImmediateGradeBackendSync(input);
+    }
+  };
+  form.addEventListener("input", handleImmediateGradeChange, true);
+  form.addEventListener("change", handleImmediateGradeChange, true);
   initUnsubmittedFieldTooltipHandlers(form);
   document.addEventListener("click", handleDocumentNavigationClick, true);
   document.addEventListener("submit", handleDocumentFormSubmit, true);
@@ -1594,6 +1772,7 @@ function syncFromSettings(settings) {
   const form = document.getElementById("problem-grader-form");
   if (form) {
     void checkGradeBackendAvailability(form);
+    startBackendRefresh(form);
   }
 }
 
@@ -1634,6 +1813,7 @@ function init() {
       const form = document.getElementById("problem-grader-form");
       if (form) {
         void checkGradeBackendAvailability(form);
+        startBackendRefresh(form);
       }
     }
   });

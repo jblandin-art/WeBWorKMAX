@@ -1,7 +1,9 @@
 # WeBWorKMAX grade backend
 
 This service stores an append-only history of grades entered through the
-extension and returns the latest grade for each student/problem.
+extension and returns the latest grade for each student/problem. The extension
+posts valid score changes shortly after they are entered, rather than waiting
+for the WebWorK form to be submitted.
 
 Student identifiers are deterministic HMAC-SHA-256 values generated in the
 extension. Raw student names and email addresses are never sent to or stored
