@@ -79,6 +79,11 @@ The service exposes:
 
 - `GET /api/grades/latest?courseId=...&setId=...&problemId=...`
 - `POST /api/grades/events`
+- `DELETE /api/grades/events?courseId=...&setId=...&problemId=...`
+
+The delete endpoint removes all stored grade events for one course, assignment,
+and problem. The extension exposes it as a confirmed, problem-scoped cleanup
+action in the popup.
 
 Latest-grade responses identify students with `studentIdHash`. Grade event
 requests must contain `studentIdHash`, not a raw username or email address:

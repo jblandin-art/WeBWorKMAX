@@ -3,10 +3,12 @@ const DEFAULT_SETTINGS = {
 };
 
 const AUTOSAVE_STORAGE_PREFIX = "webworkmaxAutosave:";
+const AUTOSAVE_INDEX_KEY = "webworkmaxAutosaveIndex";
 const COSMETICS_KEY = "cosmeticsEnabled";
 const GRADE_BACKEND_SETTINGS_KEY = "webworkmaxGradeBackendSettings";
 
 const viewAutosaveButton = document.getElementById("viewAutosaveButton");
+const clearProblemGradesButton = document.getElementById("clearProblemGradesButton");
 const autosaveInfoEl = document.getElementById("autosaveInfo");
 const cosmeticsToggle = document.getElementById("cosmeticsEnabled");
 const statusEl = document.getElementById("status");
@@ -102,6 +104,129 @@ function getProblemAutosaveKeyFromUrl(urlString) {
   return `${AUTOSAVE_STORAGE_PREFIX}${pathname}`;
 }
 
+function getProblemContextFromUrl(urlString) {
+  if (!urlString) {
+    return null;
+  }
+
+  let url;
+  try {
+    url = new URL(urlString);
+  } catch {
+    return null;
+  }
+
+  if (!/^webwork[23]\.charlotte\.edu$/i.test(url.hostname)) {
+    return null;
+  }
+
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (
+    parts.length < 6 ||
+    parts[0].toLowerCase() !== "webwork2" ||
+    parts[2].toLowerCase() !== "instructor" ||
+    parts[3].toLowerCase() !== "grader"
+  ) {
+    return null;
+  }
+
+  return {
+    courseId: decodeURIComponent(parts[1]).toLowerCase(),
+    setId: decodeURIComponent(parts[4]).toLowerCase(),
+    problemId: decodeURIComponent(parts[5]),
+    autosaveKey: getProblemAutosaveKeyFromUrl(urlString),
+  };
+}
+
+function getBackendSettings() {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(GRADE_BACKEND_SETTINGS_KEY, (stored) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error("Could not load backend settings."));
+        return;
+      }
+
+      const settings = stored[GRADE_BACKEND_SETTINGS_KEY] || {};
+      const backendUrl = `${settings.backendUrl || ""}`.trim().replace(/\/+$/, "");
+      const apiKey = `${settings.apiKey || ""}`.trim();
+      if (!backendUrl || !apiKey) {
+        resolve(null);
+        return;
+      }
+
+      resolve({ backendUrl, apiKey });
+    });
+  });
+}
+
+function removeLocalProblemAutosave(autosaveKey) {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get(AUTOSAVE_INDEX_KEY, (stored) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error("Could not load local autosave index."));
+        return;
+      }
+
+      const index = { ...(stored[AUTOSAVE_INDEX_KEY] || {}) };
+      delete index[autosaveKey];
+      chrome.storage.local.remove(autosaveKey, () => {
+        if (chrome.runtime.lastError) {
+          reject(new Error("Could not clear local autosave."));
+          return;
+        }
+
+        chrome.storage.local.set({ [AUTOSAVE_INDEX_KEY]: index }, () => {
+          if (chrome.runtime.lastError) {
+            reject(new Error("Could not update local autosave index."));
+            return;
+          }
+          resolve();
+        });
+      });
+    });
+  });
+}
+
+async function clearProblemGradesForActiveTab() {
+  const tabs = await new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, resolve);
+  });
+  const context = getProblemContextFromUrl(tabs?.[0]?.url);
+  if (!context) {
+    throw new Error("Open a supported WeBWorK Manual Grader problem first.");
+  }
+
+  const settings = await getBackendSettings();
+  if (!settings) {
+    throw new Error("Configure the grade backend before clearing shared grades.");
+  }
+
+  const confirmed = window.confirm(
+    `Clear all local and shared backup grades for ${context.courseId}/${context.setId}/problem ${context.problemId}? This cannot be undone.`,
+  );
+  if (!confirmed) {
+    return false;
+  }
+
+  const query = new URLSearchParams({
+    courseId: context.courseId,
+    setId: context.setId,
+    problemId: context.problemId,
+  });
+  const response = await fetch(`${settings.backendUrl}/api/grades/events?${query}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${settings.apiKey}` },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error || `The grade backend returned HTTP ${response.status}.`);
+  }
+
+  await removeLocalProblemAutosave(context.autosaveKey);
+  showStatus(`Cleared ${payload.deleted ?? 0} shared grade events`);
+  return true;
+}
+
 function showAutosaveInfoForActiveTab() {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const activeTab = tabs?.[0];
@@ -137,6 +262,16 @@ function initPopup() {
   });
 
   viewAutosaveButton.addEventListener("click", showAutosaveInfoForActiveTab);
+  clearProblemGradesButton.addEventListener("click", async () => {
+    clearProblemGradesButton.disabled = true;
+    try {
+      await clearProblemGradesForActiveTab();
+    } catch (error) {
+      showStatus(error.message, true);
+    } finally {
+      clearProblemGradesButton.disabled = false;
+    }
+  });
 
   cosmeticsToggle.addEventListener("change", saveSettings);
   backendUrlInput.addEventListener("change", saveGradeBackendSettings);

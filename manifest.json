@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "WeBWorKMAX",
-  "version": "1.0.2",
+  "version": "1.0.5",
   "description": "Safer collaborative grading tools for WeBWorK Manual Grader pages.",
   "action": {
     "default_popup": "popup.html",

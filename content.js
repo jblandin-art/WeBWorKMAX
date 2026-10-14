@@ -16,6 +16,10 @@ const UNSUBMITTED_TOOLTIP_ID = "webworkmax-unsubmitted-tooltip";
 const GRADE_BACKEND_SETTINGS_KEY = "webworkmaxGradeBackendSettings";
 const LEAVE_GUARD_STYLE_ID = "webworkmax-leave-guard-style";
 const LEAVE_GUARD_MODAL_ID = "webworkmax-leave-guard-modal";
+const CROSS_PROBLEM_ROW_CLASS = "webworkmax-cross-problem-row";
+const CROSS_PROBLEM_BUTTON_CLASS = "webworkmax-cross-problem-button";
+const CROSS_PROBLEM_CONTROLS_CLASS = "webworkmax-cross-problem-controls";
+const CROSS_PROBLEM_ROW_HOVER_CLASS = "webworkmax-cross-problem-row-hover";
 const UNLOAD_WARNING_MESSAGE = "Changes are saved locally but are not submitted.";
 
 let commentEnhancerInitialized = false;
@@ -34,6 +38,7 @@ let backendGradeValues = new Map();
 let latestBackendGradeValues = new Map();
 const pendingGradeInputTimers = new WeakMap();
 const gradeInputSyncQueues = new Map();
+const confirmedCrossTabZeroGrades = new Set();
 let backendRefreshTimer = null;
 let backendRefreshInProgress = false;
 let gradeBackendStatusEnabled = DEFAULT_SETTINGS.cosmeticsEnabled;
@@ -42,6 +47,8 @@ const expandedRows = new WeakMap();
 const originalButtonLabels = new WeakMap();
 const previewButtonHandlers = new WeakMap();
 let commentEnhancerObserver = null;
+let crossProblemObserver = null;
+let crossProblemInitialized = false;
 
 class GradeSyncCancelledError extends Error {
   constructor() {
@@ -224,6 +231,47 @@ function ensureLeaveGuardStyles() {
       color: #ffffff;
       font-weight: 700;
     }
+
+    .${CROSS_PROBLEM_CONTROLS_CLASS} {
+      position: relative;
+    }
+
+    .${CROSS_PROBLEM_BUTTON_CLASS} {
+      float: right;
+      opacity: 0;
+      pointer-events: none;
+      margin-left: 8px;
+      padding: 2px 6px;
+      border: 1px solid #6c757d;
+      border-radius: 3px;
+      background: #ffffff;
+      color: #343a40;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+
+    tr.${CROSS_PROBLEM_ROW_HOVER_CLASS} .${CROSS_PROBLEM_BUTTON_CLASS} {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .${CROSS_PROBLEM_ROW_CLASS} td {
+      padding: 8px 12px;
+      background: #f8fbff;
+      border-top: 1px solid #b8daff;
+    }
+
+    .${CROSS_PROBLEM_ROW_CLASS} .webworkmax-cross-problem-field {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      margin: 2px 14px 2px 0;
+      white-space: nowrap;
+    }
+
+    .${CROSS_PROBLEM_ROW_CLASS} input {
+      width: 4.5rem;
+    }
   `;
 
   document.head.appendChild(style);
@@ -366,22 +414,6 @@ function updateUnsubmittedFieldHighlights(currentValues) {
     return;
   }
 
-  function updateBackendMismatchForInput(input, backendGrade) {
-    const key = getAutosaveFieldKey(input);
-    if (!key) {
-      return;
-    }
-
-    const webworkGrade = baselineAutosaveValues?.[key];
-    if (webworkGrade !== undefined && Number(webworkGrade) !== backendGrade) {
-      backendGradeValues.set(key, backendGrade);
-    } else {
-      backendGradeValues.delete(key);
-    }
-
-    updateUnsubmittedFieldHighlights(collectAutosaveValues());
-  }
-
   for (const field of form.querySelectorAll("textarea, select, input")) {
     if (!isAutosaveField(field)) {
       continue;
@@ -412,6 +444,23 @@ function updateUnsubmittedFieldHighlights(currentValues) {
       hideUnsubmittedTooltip();
     }
   }
+
+}
+
+function updateBackendMismatchForInput(input, backendGrade) {
+  const key = getAutosaveFieldKey(input);
+  if (!key) {
+    return;
+  }
+
+  const webworkGrade = baselineAutosaveValues?.[key];
+  if (webworkGrade !== undefined && Number(webworkGrade) !== backendGrade) {
+    backendGradeValues.set(key, backendGrade);
+  } else {
+    backendGradeValues.delete(key);
+  }
+
+  updateUnsubmittedFieldHighlights(collectAutosaveValues());
 }
 
 function formatSubmittedValue(value) {
@@ -716,7 +765,8 @@ async function synchronizeGradeInputImmediately(input) {
   const key = getAutosaveFieldKey(input);
   const previousGrade = latestBackendGradeValues.get(key) ?? null;
 
-  if (newGrade === 0 && previousGrade !== null && previousGrade > 0) {
+  const skipZeroConfirmation = confirmedCrossTabZeroGrades.delete(key);
+  if (!skipZeroConfirmation && newGrade === 0 && previousGrade !== null && previousGrade > 0) {
     const confirmed = window.confirm(
       `${studentId} has a previous backup grade of ${previousGrade}. Are you sure you want to overwrite it with 0?`,
     );
@@ -727,6 +777,7 @@ async function synchronizeGradeInputImmediately(input) {
       } finally {
         localAutosaveApplying = false;
       }
+
       refreshUnsubmittedState();
       return;
     }
@@ -747,6 +798,13 @@ async function synchronizeGradeInputImmediately(input) {
     console.error("WeBWorKMAX immediate backup grade synchronization failed", error);
     setGradeBackendStatus(input.form, "unavailable");
   }
+}
+
+async function getLatestBackendGradeForStudent(studentId, settings) {
+  const studentIdHash = await encodeStudentId(studentId, settings.apiKey);
+  const latestGrades = await fetchLatestGrades(settings, getCurrentGradeContext());
+  const latest = latestGrades.get(studentIdHash);
+  return latest ? Number(latest.newGrade) : null;
 }
 
 function getGradeBackendSettings() {
@@ -1236,6 +1294,342 @@ function isTargetGradingPage(url = window.location) {
   }
 
   return /^\/webwork2\/[^/]+\/instructor\/grader\//i.test(url.pathname);
+}
+
+function sendRuntimeMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+
+      resolve(response);
+    });
+  });
+}
+
+function getLatestAnswerColumnIndex(table) {
+  for (const row of table.rows) {
+    for (const cell of row.cells) {
+      if (/latest\s+answer/i.test(cell.textContent || "")) {
+        return cell.cellIndex;
+      }
+    }
+  }
+
+  return -1;
+}
+
+function getStudentScoreInput(row) {
+  return row.querySelector("input.score-selector, select.score-selector");
+}
+
+function getStudentIdFromRow(row) {
+  const input = getStudentScoreInput(row);
+  return input ? getStudentIdFromScoreInput(input) : null;
+}
+
+function removeCrossProblemRow(row) {
+  const expandedRow = row.nextElementSibling;
+  if (expandedRow?.classList.contains(CROSS_PROBLEM_ROW_CLASS)) {
+    expandedRow.remove();
+  }
+}
+
+async function populateCrossProblemRow(expandedRow, row, studentId) {
+  const context = getCurrentGradeContext();
+  const result = await sendRuntimeMessage({
+    type: "webworkmax-get-grades-for-student",
+    ...context,
+    studentId,
+  });
+
+  if (!result?.ok || !expandedRow.isConnected) {
+    return;
+  }
+
+  const container = expandedRow.querySelector(".webworkmax-cross-problem-fields");
+  if (!container) {
+    return;
+  }
+
+  container.replaceChildren();
+  for (const tab of result.grades || []) {
+    const field = document.createElement("label");
+    field.className = "webworkmax-cross-problem-field";
+    field.textContent = `Problem ${tab.problemId}:`;
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.max = "100";
+    input.step = "any";
+    input.value = tab.grade === null ? "" : `${tab.grade}`;
+    input.disabled = !tab.available;
+    input.title = tab.available ? "" : "This problem tab is unavailable.";
+
+    input.addEventListener("change", async () => {
+      const grade = Number(input.value);
+      if (!Number.isFinite(grade) || grade < 0 || grade > 100) {
+        input.setCustomValidity("Enter a grade from 0 to 100.");
+        input.reportValidity();
+        return;
+      }
+
+      input.setCustomValidity("");
+      let confirmedZeroOverwrite = false;
+      let expectedPreviousGrade = null;
+      if (grade === 0) {
+        const preflight = await sendRuntimeMessage({
+          type: "webworkmax-prepare-grade",
+          tabId: tab.tabId,
+          studentId,
+          grade,
+        });
+        if (!preflight?.ok || !preflight.available) {
+          input.classList.add(UNSUBMITTED_FIELD_CLASS);
+          input.title = preflight?.error
+            ? `Could not verify backup grade: ${preflight.error}`
+            : "The problem tab could not verify the backup grade.";
+          return;
+        }
+
+        expectedPreviousGrade = preflight.previousGrade;
+        if (preflight.requiresConfirmation) {
+          confirmedZeroOverwrite = window.confirm(
+            `${studentId} has a previous backup grade of ${preflight.previousGrade}. Are you sure you want to overwrite it with 0?`,
+          );
+          if (!confirmedZeroOverwrite) {
+            input.value = preflight.previousGrade;
+            return;
+          }
+        }
+      }
+
+      let update = await sendRuntimeMessage({
+        type: "webworkmax-set-grade",
+        tabId: tab.tabId,
+        studentId,
+        grade,
+        confirmedZeroOverwrite,
+        expectedPreviousGrade,
+      });
+      if (update?.requiresConfirmation) {
+        confirmedZeroOverwrite = window.confirm(
+          `${studentId} has a newer backup grade of ${update.previousGrade}. Are you sure you want to overwrite it with 0?`,
+        );
+        if (!confirmedZeroOverwrite) {
+          input.value = update.previousGrade;
+          return;
+        }
+
+        expectedPreviousGrade = update.previousGrade;
+        update = await sendRuntimeMessage({
+          type: "webworkmax-set-grade",
+          tabId: tab.tabId,
+          studentId,
+          grade,
+          confirmedZeroOverwrite,
+          expectedPreviousGrade,
+        });
+      }
+      if (!update?.ok) {
+        input.classList.add(UNSUBMITTED_FIELD_CLASS);
+        input.title = update?.requiresConfirmation
+          ? `The backup grade changed to ${update.previousGrade}; confirm the overwrite again.`
+          : update?.error
+            ? `Could not update problem tab: ${update.error}`
+            : "The problem tab could not be updated.";
+      } else {
+        input.classList.remove(UNSUBMITTED_FIELD_CLASS);
+        input.title = "Grade updated.";
+      }
+    });
+
+    field.append(input);
+    container.append(field);
+  }
+}
+
+function createCrossProblemRow(row) {
+  const existingRow = row.nextElementSibling;
+  if (existingRow?.classList.contains(CROSS_PROBLEM_ROW_CLASS)) {
+    existingRow.remove();
+    return;
+  }
+
+  const studentId = getStudentIdFromRow(row);
+  const table = row.closest("table");
+  if (!studentId || !table) {
+    return;
+  }
+
+  const expandedRow = document.createElement("tr");
+  expandedRow.className = CROSS_PROBLEM_ROW_CLASS;
+  const cell = document.createElement("td");
+  cell.colSpan = row.cells.length;
+  const container = document.createElement("div");
+  container.className = "webworkmax-cross-problem-fields";
+  cell.append(container);
+  expandedRow.append(cell);
+  row.after(expandedRow);
+  void populateCrossProblemRow(expandedRow, row, studentId).catch((error) => {
+    if (!expandedRow.isConnected) {
+      return;
+    }
+
+    container.textContent = `Could not load the open problem tabs: ${error.message}`;
+  });
+}
+
+function enhanceCrossProblemRow(row) {
+  if (row.classList.contains(CROSS_PROBLEM_ROW_CLASS) || row.dataset.webworkmaxCrossProblem === "true") {
+    return;
+  }
+
+  const scoreInput = getStudentScoreInput(row);
+  const table = row.closest("table");
+  const latestAnswerColumnIndex = table ? getLatestAnswerColumnIndex(table) : -1;
+  if (!scoreInput || !table || latestAnswerColumnIndex < 0 || !row.cells[latestAnswerColumnIndex]) {
+    return;
+  }
+
+  const cell = row.cells[latestAnswerColumnIndex];
+  cell.classList.add(CROSS_PROBLEM_CONTROLS_CLASS);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = CROSS_PROBLEM_BUTTON_CLASS;
+  button.textContent = "Grade other problems";
+  row.addEventListener("mouseenter", () => {
+    row.classList.add(CROSS_PROBLEM_ROW_HOVER_CLASS);
+  });
+  row.addEventListener("mouseleave", () => {
+    row.classList.remove(CROSS_PROBLEM_ROW_HOVER_CLASS);
+  });
+  button.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    createCrossProblemRow(row);
+  });
+  cell.append(button);
+  row.dataset.webworkmaxCrossProblem = "true";
+}
+
+function enhanceCrossProblemRows() {
+  for (const row of document.querySelectorAll("tr")) {
+    enhanceCrossProblemRow(row);
+  }
+}
+
+function registerGradingTab() {
+  void sendRuntimeMessage({
+    type: "webworkmax-register-grading-tab",
+    ...getCurrentGradeContext(),
+  });
+}
+
+function initCrossProblemGrading() {
+  if (crossProblemInitialized) {
+    return;
+  }
+
+  crossProblemInitialized = true;
+  ensureLeaveGuardStyles();
+  registerGradingTab();
+  enhanceCrossProblemRows();
+  crossProblemObserver = new MutationObserver(() => enhanceCrossProblemRows());
+  crossProblemObserver.observe(document.body, { childList: true, subtree: true });
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === "webworkmax-read-student-grade") {
+      const form = document.getElementById("problem-grader-form");
+      const input = form
+        ? getScoreInputs(form).find((candidate) => getStudentIdFromScoreInput(candidate) === message.studentId)
+        : null;
+      sendResponse({
+        available: Boolean(input),
+        grade: input ? getNumericScore(input) : null,
+      });
+      return false;
+    }
+
+    if (message?.type === "webworkmax-prepare-student-grade") {
+      void (async () => {
+        try {
+          const settings = await getGradeBackendSettings();
+          if (!settings) {
+            sendResponse({ ok: false, available: false });
+            return;
+          }
+
+          const previousGrade = await getLatestBackendGradeForStudent(message.studentId, settings);
+          sendResponse({
+            ok: true,
+            available: true,
+            previousGrade,
+            requiresConfirmation: message.grade === 0 && previousGrade !== null && previousGrade > 0,
+          });
+        } catch (error) {
+          console.error("WeBWorKMAX cross-tab grade preflight failed", error);
+        sendResponse({ ok: false, available: false, error: error.message });
+        }
+      })();
+      return true;
+    }
+
+    if (message?.type === "webworkmax-set-student-grade") {
+      void (async () => {
+        const form = document.getElementById("problem-grader-form");
+        const input = form
+          ? getScoreInputs(form).find((candidate) => getStudentIdFromScoreInput(candidate) === message.studentId)
+          : null;
+        if (!input) {
+          sendResponse({ ok: false });
+          return;
+        }
+
+        if (message.grade === 0) {
+          try {
+            const settings = await getGradeBackendSettings();
+            if (!settings) {
+              sendResponse({ ok: false, available: false });
+              return;
+            }
+
+            const previousGrade = await getLatestBackendGradeForStudent(message.studentId, settings);
+            const requiresConfirmation = previousGrade !== null && previousGrade > 0;
+            if (
+              requiresConfirmation &&
+              (!message.confirmedZeroOverwrite || previousGrade !== message.expectedPreviousGrade)
+            ) {
+              sendResponse({
+                ok: false,
+                requiresConfirmation: true,
+                previousGrade,
+              });
+              return;
+            }
+
+            confirmedCrossTabZeroGrades.add(getAutosaveFieldKey(input));
+            latestBackendGradeValues.set(getAutosaveFieldKey(input), previousGrade);
+          } catch (error) {
+            console.error("WeBWorKMAX cross-tab grade commit check failed", error);
+            sendResponse({ ok: false, available: false, error: error.message });
+            return;
+          }
+        }
+
+        input.value = `${message.grade}`;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        sendResponse({ ok: true });
+      })();
+      return true;
+    }
+
+    return false;
+  });
 }
 
 function ensureCommentEnhancerStyles() {
@@ -1789,6 +2183,7 @@ function init() {
   }
 
   initLocalAutosave();
+  initCrossProblemGrading();
 
   chrome.storage.sync.get(DEFAULT_SETTINGS, (settings) => {
     if (chrome.runtime.lastError) {

@@ -41,7 +41,7 @@ function sendJson(response, statusCode, body) {
     "Content-Type": "application/json; charset=utf-8",
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
   });
   response.end(JSON.stringify(body));
 }
@@ -189,6 +189,20 @@ async function handleRequest(request, response) {
     }
 
     sendJson(response, 201, { inserted: events.length });
+    return;
+  }
+
+  if (request.method === "DELETE" && url.pathname === "/api/grades/events") {
+    const courseId = requireLowercaseText(url.searchParams.get("courseId"), "courseId");
+    const setId = requireLowercaseText(url.searchParams.get("setId"), "setId");
+    const problemId = requireText(url.searchParams.get("problemId"), "problemId");
+    const result = await pool.query(
+      `DELETE FROM grade_events
+       WHERE course_id = $1 AND set_id = $2 AND problem_id = $3`,
+      [courseId, setId, problemId],
+    );
+
+    sendJson(response, 200, { deleted: result.rowCount });
     return;
   }
 

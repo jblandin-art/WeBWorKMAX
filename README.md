@@ -1,4 +1,4 @@
-# WeBWorKMAX (v1.0.2)
+# WeBWorKMAX (v1.0.5)
 
 Small browser extension for WeBWorK Manual Grader pages.
 
@@ -11,6 +11,11 @@ Small browser extension for WeBWorK Manual Grader pages.
 - Shows the submitted WebWorK value when hovering over a highlighted field.
 - Sends valid score changes to the shared backup grade history as they are
   entered, and refreshes other graders' pages every 15 seconds.
+- Adds a per-student cross-problem grading row. Hover over a student row and
+  click **Grade other problems** to enter grades for all matching problem tabs
+  without searching for the student repeatedly.
+- Cross-problem zero overwrites are preflighted and confirmed in the active tab,
+  then rechecked against the backend by the target problem tab before commit.
 - Uses the latest backup grade as the displayed value when the optional backend
   is available. A yellow highlight indicates that the displayed backup grade
   differs from the value WebWorK originally rendered.
