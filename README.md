@@ -6,6 +6,9 @@ Small browser extension for WeBWorK Manual Grader pages.
 
 - Improves grading-page layout (score column sizing, comment workflow, cleaner controls).
 - Adds local autosave for grading form edits.
+- Local autosave stores only fields personally changed by the grader or
+  restored from that grader's prior autosave; untouched WebWorK and
+  backend-applied values are not copied into autosave.
 - Warns when leaving with local changes not yet submitted in WeBWorK.
 - Highlights fields that differ from the last WebWorK-loaded/submitted values.
 - Shows the submitted WebWorK value when hovering over a highlighted field.
@@ -19,6 +22,9 @@ Small browser extension for WeBWorK Manual Grader pages.
 - Uses the latest backup grade as the displayed value when the optional backend
   is available. A yellow highlight indicates that the displayed backup grade
   differs from the value WebWorK originally rendered.
+- When local and backend backup values conflict, the latest backend backup
+  value is displayed and the field is highlighted yellow against the original
+  WebWorK-rendered value. Local autosave does not override the backend value.
 - Preserves native WebWorK grading when the optional backup backend is
   unavailable.
 

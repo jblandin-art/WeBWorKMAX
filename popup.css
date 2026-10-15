@@ -120,6 +120,17 @@ body {
   color: var(--muted);
 }
 
+.autosave-details {
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f8fafc;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .switch {
   position: relative;
   display: inline-block;

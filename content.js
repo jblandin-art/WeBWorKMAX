@@ -36,6 +36,7 @@ let allowGraderFormSubmit = false;
 let initialScoreValues = new Map();
 let backendGradeValues = new Map();
 let latestBackendGradeValues = new Map();
+const personallyChangedAutosaveKeys = new Set();
 const pendingGradeInputTimers = new WeakMap();
 const gradeInputSyncQueues = new Map();
 const confirmedCrossTabZeroGrades = new Set();
@@ -683,6 +684,7 @@ function handleDocumentFormSubmit(event) {
         const submitValues = collectAutosaveValues();
         baselineAutosaveValues = submitValues;
         baselineFormValuesSignature = serializeAutosaveValues(submitValues);
+        personallyChangedAutosaveKeys.clear();
         setUnsubmittedLocalChanges(false);
         backendGradeValues = new Map();
         updateUnsubmittedFieldHighlights(submitValues);
@@ -1110,15 +1112,61 @@ function getAutosaveFieldKey(element) {
   return `${element.tagName.toLowerCase()}:${fieldName}`;
 }
 
+function getAutosaveFieldValue(field) {
+  if (field.tagName === "INPUT") {
+    const type = (field.type || "").toLowerCase();
+    if (type === "checkbox" || type === "radio") {
+      return Boolean(field.checked);
+    }
+  }
+
+  return field.value;
+}
+
+function trackPersonallyChangedField(event) {
+  if (localAutosaveApplying || isSubmittingGraderForm) {
+    return;
+  }
+
+  const field = event.target?.closest?.("textarea, select, input");
+  if (!field) {
+    return;
+  }
+
+  const key = getAutosaveFieldKey(field);
+  if (!key) {
+    return;
+  }
+
+  const baselineValue = baselineAutosaveValues?.[key];
+  if (baselineValue !== undefined && JSON.stringify(getAutosaveFieldValue(field)) === JSON.stringify(baselineValue)) {
+    personallyChangedAutosaveKeys.delete(key);
+  } else {
+    personallyChangedAutosaveKeys.add(key);
+  }
+}
+
 function collectAutosaveSnapshot() {
   const values = collectAutosaveValues();
-  if (!values) {
+  if (!values || personallyChangedAutosaveKeys.size === 0) {
+    return null;
+  }
+
+  const changedValues = {};
+  for (const key of personallyChangedAutosaveKeys) {
+    if (Object.hasOwn(values, key)) {
+      changedValues[key] = values[key];
+    }
+  }
+  if (Object.keys(changedValues).length === 0) {
     return null;
   }
 
   return {
+    version: 2,
     savedAt: new Date().toISOString(),
-    values,
+    changedKeys: Object.keys(changedValues),
+    values: changedValues,
   };
 }
 
@@ -1160,7 +1208,7 @@ function collectAutosaveValues() {
 }
 
 function applyAutosaveSnapshot(snapshot) {
-  if (!snapshot?.values) {
+  if (!snapshot?.values || !Array.isArray(snapshot.changedKeys)) {
     return;
   }
 
@@ -1179,12 +1227,13 @@ function applyAutosaveSnapshot(snapshot) {
       }
 
       const key = getAutosaveFieldKey(field);
-      if (!key || !Object.hasOwn(snapshot.values, key)) {
+      if (!key || !snapshot.changedKeys.includes(key) || !Object.hasOwn(snapshot.values, key)) {
         continue;
       }
 
       const nextValue = snapshot.values[key];
       const backendValue = latestBackendGradeValues.get(key);
+      personallyChangedAutosaveKeys.add(key);
       if (field.tagName === "INPUT") {
         const type = (field.type || "").toLowerCase();
         if (type === "checkbox" || type === "radio") {
@@ -1207,6 +1256,7 @@ function persistAutosaveSnapshot() {
 
   const snapshot = collectAutosaveSnapshot();
   if (!snapshot) {
+    clearLocalAutosaveForCurrentProblem();
     return;
   }
 
@@ -1246,6 +1296,12 @@ function restoreAutosaveSnapshot() {
       return;
     }
 
+    if (!Array.isArray(snapshot.changedKeys)) {
+      clearLocalAutosaveForCurrentProblem();
+      refreshUnsubmittedState();
+      return;
+    }
+
     applyAutosaveSnapshot(snapshot);
     refreshUnsubmittedState();
   });
@@ -1274,6 +1330,8 @@ function initLocalAutosave() {
 
   form.addEventListener("input", scheduleAutosaveSnapshot, true);
   form.addEventListener("change", scheduleAutosaveSnapshot, true);
+  form.addEventListener("input", trackPersonallyChangedField, true);
+  form.addEventListener("change", trackPersonallyChangedField, true);
   const handleImmediateGradeChange = (event) => {
     const input = event.target?.closest?.("input.score-selector, select.score-selector");
     if (input && getScoreInputs(form).includes(input)) {
@@ -1542,6 +1600,12 @@ function initCrossProblemGrading() {
   crossProblemObserver.observe(document.body, { childList: true, subtree: true });
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === "webworkmax-prepare-autosave-clear") {
+      isSubmittingGraderForm = true;
+      sendResponse({ ok: true });
+      return false;
+    }
+
     if (message?.type === "webworkmax-read-student-grade") {
       const form = document.getElementById("problem-grader-form");
       const input = form

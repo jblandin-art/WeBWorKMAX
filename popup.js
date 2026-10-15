@@ -161,28 +161,60 @@ function getBackendSettings() {
 
 function removeLocalProblemAutosave(autosaveKey) {
   return new Promise((resolve, reject) => {
-    chrome.storage.local.get(AUTOSAVE_INDEX_KEY, (stored) => {
+    chrome.storage.local.get(null, (stored) => {
       if (chrome.runtime.lastError) {
-        reject(new Error("Could not load local autosave index."));
+        reject(new Error("Could not load local autosaves."));
         return;
       }
 
       const index = { ...(stored[AUTOSAVE_INDEX_KEY] || {}) };
-      delete index[autosaveKey];
-      chrome.storage.local.remove(autosaveKey, () => {
+      const normalizedTarget = autosaveKey.toLowerCase().replace(/\/+$/, "");
+      const matchingKeys = Object.keys(stored).filter((key) => {
+        return key.startsWith(AUTOSAVE_STORAGE_PREFIX)
+          && key.toLowerCase().replace(/\/+$/, "") === normalizedTarget;
+      });
+      if (!matchingKeys.includes(autosaveKey)) {
+        matchingKeys.push(autosaveKey);
+      }
+      for (const key of matchingKeys) {
+        delete index[key];
+      }
+
+      chrome.storage.local.remove(matchingKeys, () => {
         if (chrome.runtime.lastError) {
-          reject(new Error("Could not clear local autosave."));
+          reject(new Error("Could not clear local autosaves."));
           return;
         }
 
-        chrome.storage.local.set({ [AUTOSAVE_INDEX_KEY]: index }, () => {
+        chrome.storage.local.get(matchingKeys, (remaining) => {
           if (chrome.runtime.lastError) {
-            reject(new Error("Could not update local autosave index."));
+            reject(new Error("Could not verify local autosave cleanup."));
             return;
           }
-          resolve();
+
+          const remainingKeys = Object.keys(remaining);
+          if (remainingKeys.length > 0) {
+            reject(new Error(`Could not clear local autosave key: ${remainingKeys[0]}`));
+            return;
+          }
+
+          chrome.storage.local.set({ [AUTOSAVE_INDEX_KEY]: index }, () => {
+            if (chrome.runtime.lastError) {
+              reject(new Error("Could not update local autosave index."));
+              return;
+            }
+            resolve();
+          });
         });
       });
+    });
+  });
+}
+
+function prepareActiveTabForAutosaveClear(tabId) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, { type: "webworkmax-prepare-autosave-clear" }, () => {
+      resolve();
     });
   });
 }
@@ -191,7 +223,8 @@ async function clearProblemGradesForActiveTab() {
   const tabs = await new Promise((resolve) => {
     chrome.tabs.query({ active: true, currentWindow: true }, resolve);
   });
-  const context = getProblemContextFromUrl(tabs?.[0]?.url);
+  const activeTab = tabs?.[0];
+  const context = getProblemContextFromUrl(activeTab?.url);
   if (!context) {
     throw new Error("Open a supported WeBWorK Manual Grader problem first.");
   }
@@ -222,7 +255,21 @@ async function clearProblemGradesForActiveTab() {
     throw new Error(payload.error || `The grade backend returned HTTP ${response.status}.`);
   }
 
+  if (activeTab?.id !== undefined) {
+    await prepareActiveTabForAutosaveClear(activeTab.id);
+  }
   await removeLocalProblemAutosave(context.autosaveKey);
+  if (activeTab?.id !== undefined) {
+    await new Promise((resolve, reject) => {
+      chrome.tabs.reload(activeTab.id, () => {
+        if (chrome.runtime.lastError) {
+          reject(new Error("Grades were cleared, but the problem page could not be reloaded."));
+          return;
+        }
+        resolve();
+      });
+    });
+  }
   showStatus(`Cleared ${payload.deleted ?? 0} shared grade events`);
   return true;
 }
@@ -233,6 +280,7 @@ function showAutosaveInfoForActiveTab() {
     const autosaveKey = getProblemAutosaveKeyFromUrl(activeTab?.url);
 
     if (!autosaveKey) {
+      autosaveInfoEl.classList.remove("autosave-details");
       autosaveInfoEl.textContent = "Open a WeBWorK grader page to view autosave time";
       return;
     }
@@ -240,13 +288,24 @@ function showAutosaveInfoForActiveTab() {
     chrome.storage.local.get(autosaveKey, (stored) => {
       const snapshot = stored[autosaveKey];
       if (!snapshot?.savedAt) {
+        autosaveInfoEl.classList.remove("autosave-details");
         autosaveInfoEl.textContent = "Last autosave for this problem: None yet";
         return;
       }
 
       const date = new Date(snapshot.savedAt);
       const formatted = Number.isNaN(date.getTime()) ? snapshot.savedAt : date.toLocaleString();
-      autosaveInfoEl.textContent = `Last autosave for this problem: ${formatted}`;
+      const values = Object.entries(snapshot.values || {});
+      const valueLines = values.length === 0
+        ? ["No saved fields."]
+        : values.map(([field, value]) => `${field}: ${typeof value === "boolean" ? (value ? "checked" : "unchecked") : value}`);
+      autosaveInfoEl.textContent = [
+        `Last autosave for this problem: ${formatted}`,
+        "",
+        "Saved values:",
+        ...valueLines,
+      ].join("\n");
+      autosaveInfoEl.classList.add("autosave-details");
     });
   });
 }
